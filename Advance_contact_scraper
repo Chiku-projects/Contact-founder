@@ -1,0 +1,134 @@
+import time
+import re
+import logging
+import pandas as pd
+from urllib.parse import urljoin, urlparse
+
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+from webdriver_manager.chrome import ChromeDriverManager
+
+# ================= CONFIG =================
+MAX_PAGES = 10
+DELAY = 2
+FILTER_FREE_EMAILS = False
+
+FREE_DOMAINS = ["gmail.com", "yahoo.com", "hotmail.com", "outlook.com"]
+
+# ================= LOGGING =================
+logging.basicConfig(
+    filename="scraper.log",
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s"
+)
+
+# ================= CHROME SETUP =================
+options = Options()
+options.add_argument("--headless=new")
+options.add_argument("--disable-blink-features=AutomationControlled")
+options.add_argument("--start-maximized")
+options.add_argument("user-agent=Mozilla/5.0")
+
+service = Service(ChromeDriverManager().install())
+driver = webdriver.Chrome(service=service, options=options)
+
+# ================= FUNCTIONS =================
+
+def extract_contacts(html):
+    emails = set(re.findall(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", html))
+    phones = set(re.findall(r"\+?\d[\d\s\-]{8,}\d", html))
+
+    filtered_emails = set()
+
+    for email in emails:
+        domain = email.split("@")[-1].lower()
+        if FILTER_FREE_EMAILS:
+            if domain not in FREE_DOMAINS:
+                filtered_emails.add(email)
+        else:
+            filtered_emails.add(email)
+
+    return filtered_emails, phones
+
+
+def crawl_website(base_url):
+    visited = set()
+    to_visit = [base_url]
+    collected = []
+
+    base_domain = urlparse(base_url).netloc
+
+    while to_visit and len(visited) < MAX_PAGES:
+        url = to_visit.pop(0)
+
+        if url in visited:
+            continue
+
+        try:
+            print(f"Visiting: {url}")
+            logging.info(f"Visiting: {url}")
+
+            driver.get(url)
+            time.sleep(DELAY)
+
+            visited.add(url)
+
+            emails, phones = extract_contacts(driver.page_source)
+
+            for email in emails:
+                collected.append({
+                    "Website": base_url,
+                    "Email": email,
+                    "Phone": ""
+                })
+
+            for phone in phones:
+                collected.append({
+                    "Website": base_url,
+                    "Email": "",
+                    "Phone": phone
+                })
+
+            # Find internal links
+            links = driver.find_elements(By.TAG_NAME, "a")
+
+            for link in links:
+                href = link.get_attribute("href")
+
+                if href:
+                    parsed_href = urlparse(href)
+
+                    # Stay inside same domain
+                    if base_domain in parsed_href.netloc:
+                        if href not in visited:
+                            to_visit.append(href)
+
+        except Exception as e:
+            logging.error(f"Error visiting {url}: {str(e)}")
+
+    return collected
+
+
+# ================= MAIN =================
+
+all_results = []
+
+websites = pd.read_csv("websites.csv")
+
+for site in websites["url"]:
+    print(f"\nScraping: {site}")
+    data = crawl_website(site)
+    all_results.extend(data)
+
+# Remove duplicates
+df = pd.DataFrame(all_results)
+df.drop_duplicates(inplace=True)
+
+df.to_excel("output.xlsx", index=False)
+
+driver.quit()
+
+print("\nScraping Completed ✅")
+print(f"Total records collected: {len(df)}")
